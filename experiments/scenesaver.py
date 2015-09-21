@@ -31,14 +31,15 @@ class Light:
         return "[light: name=%s, state=%s]" % (self.name, self.lightState)
 
 class LightState:
-    def __init__(self, bri, mode, ct, on):
+    def __init__(self, bri, mode, ct, xy, on):
         self.bri = bri
         self.mode = mode
         self.ct = ct
+        self.xy = xy
         self.on = on
 
     def __str__(self):
-        return "[lightState: bri=%s, mode=%s, ct=%s, on=%s]" % (self.bri, self.mode, self.ct, self.on)
+        return "[lightState: bri=%s, mode=%s, ct=%s, xy=%s on=%s]" % (self.bri, self.mode, self.ct, self.xy, self.on)
 
 scenes = []
 
@@ -68,20 +69,32 @@ def updateBri(lightnum, bri):
   data = "{\"bri\": %d}" % bri
   put(url, data)
 
+def updateColormode(lightnum, colormode):
+  url = makeStateUrl(lightnum)
+  data = "{\"colormode\": %s}" % colormode
+  put(url, data)
+
+def updateXy(lightnum, xy):
+  url = makeStateUrl(lightnum)
+  data = "{\"xy\": [%s, %s]}" % xy
+  put(url, data)
+
 def updateOn(lightnum, isOn):
   url = makeStateUrl(lightnum)
-  data = "{\"on\": %s}" % str(isOn)
+  data = "{\"on\": %s}" % str(isOn).lower()
   put(url, data)
 
 def updateLight(lightnum, light):
     state = light.lightState
+    updateColormode(lightnum, state.mode)
     updateCt(lightnum, state.ct)
+    updateXy(lightnum, state.xy)
     updateBri(lightnum, state.bri)
-    updateOn(lightnum, state.bri)
+    updateOn(lightnum, state.on)
 
 def updateScene(scene):
-    for lightnum, light in scene.lights:
-        updateLight(lightnum, light)
+    for lightnum, light in scene.lights.iteritems():
+        updateLight(int(lightnum), light)
 
 def printState():
   lightsJson = get(BASE_URL)
@@ -92,7 +105,7 @@ def saveScene():
     jsonText = get(BASE_URL)
     lightsJson = json.loads(jsonText)
     scene = Scene()
-    scenes.append(scene)
+    scenes.insert(currentScene, scene)
     for lightnum, info in lightsJson.iteritems():
         name = info['name']
         state = info['state']
@@ -100,7 +113,9 @@ def saveScene():
         mode = state['colormode']
         ct = state['ct']
         on = state['on']
-        lightState = LightState(bri,mode,ct,on)
+        xyArray = state['xy']
+        xyTuple = (xyArray[0], xyArray[1])
+        lightState = LightState(bri,mode,ct,xyTuple,on)
         light = Light(name, lightState)
         scene.addLight(lightnum, light)
 
