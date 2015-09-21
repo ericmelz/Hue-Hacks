@@ -123,7 +123,12 @@ def saveScene():
     saveData()
 
 def deleteScene():
+    global scenes
     print("deleting scene")
+    if (len(scenes) > 0):
+        scene = scenes[currentScene]
+        scenes.remove(scene)
+        saveData()
 
 def nextScene():
     global currentScene
@@ -132,7 +137,12 @@ def nextScene():
     updateScene(scenes[currentScene])
 
 def previousScene():
+    global currentScene
     print("moving to previous scene")
+    if (len(scenes) > 0):
+        currentScene = currentScene - 1
+        if (currentScene < 0):
+            currentScene = len(scenes) - 1
 
 def dumpInfo():
     print("There are %d scenes saved." % len(scenes))
