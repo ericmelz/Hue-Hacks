@@ -4,6 +4,10 @@ import urllib2
 import json
 import pprint
 
+BASE_URL = "http://192.168.1.62/api/newdeveloper/lights"
+
+currentScene = 0
+
 class Scene:
     def __init__(self):
         self.lights = {}
@@ -18,7 +22,6 @@ class Scene:
             s += "  " + str(k) + " -> " + str(v) + "\n"
         return s + "]"
             
-
 class Light:
     def __init__(self, name, lightState):
         self.name = name
@@ -39,14 +42,46 @@ class LightState:
 
 scenes = []
 
+def makeStateUrl(lightnum):
+  return "%s/%d/state" % (BASE_URL, lightnum)
+
 def get(url):
   response = urllib2.urlopen(url)
   return response.read()
 
+def put(url, data):
+  opener = urllib2.build_opener(urllib2.HTTPHandler)
+  request = urllib2.Request(url, data=data)
+  request.get_method = lambda: 'PUT'
+  result = opener.open(request)
+
 def makeStateUrl(lightnum):
   return "http://192.168.1.62/api/newdeveloper/lights/%d/state" % lightnum
 
-BASE_URL = "http://192.168.1.62/api/newdeveloper/lights"
+def updateCt(lightnum, ct):
+  url = makeStateUrl(lightnum)
+  data = "{\"ct\": %d}" % ct
+  put(url, data)
+
+def updateBri(lightnum, bri):
+  url = makeStateUrl(lightnum)
+  data = "{\"bri\": %d}" % bri
+  put(url, data)
+
+def updateOn(lightnum, isOn):
+  url = makeStateUrl(lightnum)
+  data = "{\"on\": %s}" % str(isOn)
+  put(url, data)
+
+def updateLight(lightnum, light):
+    state = light.lightState
+    updateCt(lightnum, state.ct)
+    updateBri(lightnum, state.bri)
+    updateOn(lightnum, state.bri)
+
+def updateScene(scene):
+    for lightnum, light in scene.lights:
+        updateLight(lightnum, light)
 
 def printState():
   lightsJson = get(BASE_URL)
@@ -73,13 +108,17 @@ def deleteScene():
     print("deleting scene")
 
 def nextScene():
+    global currentScene
     print("moving to next scene")
+    currentScene = (currentScene + 1) % len(scenes)
+    updateScene(scenes[currentScene])
 
 def previousScene():
     print("moving to previous scene")
 
 def dumpInfo():
     print("There are %d scenes saved." % len(scenes))
+    print("Current scene: %d" % currentScene)
     print("Scenes:")
     for i in range(0,len(scenes)):
         print(str(scenes[i]))
