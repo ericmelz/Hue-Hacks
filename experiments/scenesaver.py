@@ -1,9 +1,11 @@
 #!/usr/bin/python
 
-import urllib2
 import json
+import pickle
 import pprint
+import urllib2
 
+DATA_FILE = "/var/piHue/scenes.p"
 BASE_URL = "http://192.168.1.62/api/newdeveloper/lights"
 
 currentScene = 0
@@ -118,6 +120,7 @@ def saveScene():
         lightState = LightState(bri,mode,ct,xyTuple,on)
         light = Light(name, lightState)
         scene.addLight(lightnum, light)
+    saveData()
 
 def deleteScene():
     print("deleting scene")
@@ -148,6 +151,23 @@ def printHelp():
     print("  [q]uit")
     print("  [?] help")
 
+
+def loadData():
+    global scenes
+    scenes = pickle.load(open(DATA_FILE, "rb"))
+
+def saveData():
+    pickle.dump(scenes, open(DATA_FILE, "wb"))
+
+def init():
+    try:
+        print("Attempting to load the scene file..")
+        loadData()
+        print("Successfully loaded scenes.")
+    except:
+        print("Warning: Load not successful.  Could be first launch or the data file may have been deleted or corrupted.")
+
+init()
 
 while True:
     input = raw_input("Enter command: [s,d,n,p,i,?,q]):")
