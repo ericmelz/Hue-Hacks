@@ -17,8 +17,14 @@ def init():
     
 def doSomething():
     global logger
-    logger.warning("Hey, I'm doing something!")
+    try:
+        logger.warning("Hey, I'm doing something!")
+        raise Exception('yowza')
+    except Exception as ex:
+        logger.exception(ex)
+        
+        
 
 init()
-for i in range(1000000):
+for i in range(2):
     doSomething()
