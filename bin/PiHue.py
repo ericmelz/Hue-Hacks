@@ -5,10 +5,14 @@
 from __future__ import division
 import RPi.GPIO as GPIO
 import json
+import logging
+import logging.handlers
+import os
 import spidev
 import threading
 import time
 import urllib2
+import ConfigParser
 
 KNOB_CHANNEL = 0
 JITTER_TOLERANCE = 7
@@ -27,8 +31,6 @@ KNOB_MID = (KNOB_MIN + KNOB_MAX) / 2
 BRIGHT_MIN = 0
 BRIGHT_MAX = 254
 
-BASE_URL = 'http://192.168.1.62/api/newdeveloper/lights'
-
 CHECK_LIGHTS_SLEEP_TIME = 0.5
 CHECK_BUTTON_SLEEP_TIME = 0.05
 CHECK_KNOB_SLEEP_TIME = .05
@@ -38,6 +40,18 @@ FAST_BLINK_TIME = .1
 REALLY_FAST_BLINK_TIME = .05
 
 LONG_PRESS_TIME = 2.0
+
+DISCOVERY_URL = "https://www.meethue.com/api/nupnp"
+DATA_DIR = "/var/piHue"
+LOGS_DIR = "/var/piHue/logs"
+LOG_FILE_BASE = "/var/piHue/logs/pieHue.log"
+CONFIG_FILE = "%s/piHue.conf" % DATA_DIR
+HUE_SECTION = "Hue"
+BRIDGE_IP_OPTION = "bridgeIp"
+
+
+# Address of Hue Bridge
+bridgeIp = None
 
 # Indicates whether Hue lights are off.
 lightsOff = True
@@ -85,8 +99,35 @@ def timing(f):
         return ret
     return wrap
 
+
+def getBaseUrl():
+    baseUrl = "http://%s/api/newdeveloper/lights" % bridgeIp
+    return baseUrl
+
 def makeStateUrl(lightnum):
-    return "%s/%d/state" % (BASE_URL, lightnum)
+    return "%s/%d/state" % (getBaseUrl(), lightnum)
+
+def fetchHueBridgeIp():
+    jsonText = get(DISCOVERY_URL)
+    bridgesJson = json.loads(jsonText)
+    bridgeJson = bridgesJson[0] # grab the first bridge
+    logger.info("bridgeJson is %s" % str(bridgeJson))
+    return bridgeJson['internalipaddress']
+
+def writeConfig(bridgeIp):
+    f = open(CONFIG_FILE, 'w')
+    f.write("[%s]\n%s=%s" % (HUE_SECTION, BRIDGE_IP_OPTION, bridgeIp))
+    f.close
+
+def readConfig():
+    config = ConfigParser.ConfigParser()
+    config.readfp(open(CONFIG_FILE))
+    bridgeIp = config.get(HUE_SECTION, BRIDGE_IP_OPTION)
+    return bridgeIp
+
+def ensureDir(dir):
+    if not os.path.exists(dir):
+        os.makedirs(dir)
 
 def computeBrightness(knobValue, coefficients):
     (a, b) = coefficients
@@ -112,7 +153,7 @@ def computeBrightnessCurve(normalBrightness):
 
 def computeBrightnessCurves():
     global lightToCurve
-    jsonText = get(BASE_URL)
+    jsonText = get(getBaseUrl())
     lightsJson = json.loads(jsonText)
     for name, info in lightsJson.iteritems():
         state = info['state']
@@ -240,13 +281,11 @@ def readKnob():
 def changeBrightness(lightnum, brightness):
   url = makeStateUrl(lightnum)
   data = "{\"bri\": %d}" % brightness
-  if (lightnum == 10):
-      print("  Brightness: %d"%brightness)
   put(url, data)
 
 
 def updateBrightness():
-    jsonText = get(BASE_URL)
+    jsonText = get(getBaseUrl())
     lightsJson = json.loads(jsonText)
     for light, info in lightsJson.iteritems():
         lightCurve = lightToCurve[light]
@@ -269,7 +308,6 @@ def knobCheckWorker():
             elif (knob >= KNOB_MAX - JITTER_TOLERANCE):
                 knob = KNOB_MAX
             lastKnob = knob
-            print("Knob:%d" % lastKnob)
             updateBrightness()
     time.sleep(CHECK_KNOB_SLEEP_TIME)
 
@@ -289,7 +327,7 @@ def lightCheckWorker():
     while True:
         time.sleep(CHECK_LIGHTS_SLEEP_TIME)
         # Fetch json
-        jsonText = get(BASE_URL)
+        jsonText = get(getBaseUrl())
         lightsJson = json.loads(jsonText)
 
         # If lights have changed (e.g., by phone), update light state
@@ -395,18 +433,63 @@ def buttonCheckWorker(buttonPin, buttonLightPin, shortPressAction, longPressActi
         if detectedPress and not detectedLongPress:
             shortPressAction()
 
-
-
-def init():
-    global lightsOff
+def initADC():
     global spi
     spi = spidev.SpiDev()
     spi.open(0,0)
-    jsonText = get(BASE_URL)
+
+
+def initLightState():
+    global lightsOff
+    jsonText = get(getBaseUrl())
     lightsJson = json.loads(jsonText)
     lightsOff = allLightsAreOff(lightsJson)
-    computeBrightnessCurves()
-    updateMainLed()
+
+def initLogger():
+    global logger
+
+    ensureDir(LOGS_DIR)
+
+    logger = logging.getLogger('logjam')
+    logger.setLevel(logging.DEBUG)
+
+    handler = logging.handlers.RotatingFileHandler(LOG_FILE_BASE, maxBytes=1000000, backupCount=3)
+    handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+def initConfig():
+    global bridgeIp
+
+    ensureDir(DATA_DIR)
+    if not os.path.exists(CONFIG_FILE):
+        logger.info("config file doesn't exist.  Going to create.")
+        logger.info("Fetching bridge ip...")
+        ip = fetchHueBridgeIp()
+        logger.info("Writing config..")
+        writeConfig(ip)
+        logger.info("Reading config...")
+        bridgeIp = readConfig()
+    logger.info("Reading config...")
+    bridgeIp = readConfig()
+
+
+def init():
+    try:
+        initLogger()
+        initConfig()
+        logger.info("Starting...")
+        initADC()
+        initLightState()
+        logger.info("Bridge ip is %s" % bridgeIp)
+        computeBrightnessCurves()
+        updateMainLed()
+    except Exception as ex:
+        print("ex is %s" % str(ex))
+        logger.exception(ex)
 
 def startWorkerThreads():
     threading.Thread(target=lightCheckWorker).start()
