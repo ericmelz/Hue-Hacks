@@ -15,7 +15,7 @@
 # - Blue Button: Switch to the next scene
 #
 # A long press will trigger a secondary functinon.  The secondary functions are:
-# - Square button: clear all scenes
+# - Square button: Dump state to log
 # - Red Button: Delete the current scene
 # - Blue Button: Save the current scene
 #
@@ -31,8 +31,6 @@
 # - blinkTwice - indicates switching scenes
 #
 # Log data is saved at /var/piHue/logs
-
-# TODO log.debug events like switching scenes
 
 from __future__ import division
 import RPi.GPIO as GPIO
@@ -77,7 +75,7 @@ LONG_PRESS_TIME = 2.0
 DISCOVERY_URL = "https://www.meethue.com/api/nupnp"
 DATA_DIR = "/var/piHue"
 LOGS_DIR = "/var/piHue/logs"
-LOG_FILE_BASE = "/var/piHue/logs/pieHue.log"
+LOG_FILE_BASE = "/var/piHue/logs/piHue.log"
 DATA_FILE = "/var/piHue/scenes.p"
 CONFIG_FILE = "%s/piHue.conf" % DATA_DIR
 HUE_SECTION = "Hue"
@@ -212,10 +210,9 @@ def updateLight(lightnum, light):
     updateBri(lightnum, state.bri)
     updateOn(lightnum, state.on)
 
-def updateScene(scene):
-    global currentSceneObj
-    currentSceneObj = scene
-    for lightnum, light in scene.lights.iteritems():
+def updateScene():
+    logger.info("Updating scene")
+    for lightnum, light in currentSceneObj.lights.iteritems():
         updateLight(int(lightnum), light)
 
 def fetchHueBridgeIp():
@@ -236,23 +233,10 @@ def printState():
 
 def saveScene():
     logger.info("saving scene")
-    # TODO this logic can be refactored into readScene, used during lightCheckworker
     jsonText = get(getBaseUrl())
     lightsJson = json.loads(jsonText)
-    scene = Scene()
+    scene = readScene(lightsJson)
     scenes.insert(currentScene, scene)
-    for lightnum, info in lightsJson.iteritems():
-        name = info['name']
-        state = info['state']
-        bri = state['bri']
-        mode = state['colormode']
-        ct = state['ct']
-        on = state['on']
-        xyArray = state['xy']
-        xyTuple = (xyArray[0], xyArray[1])
-        lightState = LightState(bri,mode,ct,xyTuple,on)
-        light = Light(name, lightState)
-        scene.addLight(lightnum, light)
     saveData()
 
 def deleteScene():
@@ -265,13 +249,21 @@ def deleteScene():
     # Try to make currentScene in an ok state.  If there's no scenes left, nothing happens
     previousScene()
         
+def updateCurrentSceneObjWithCurrentScene():
+    updateCurrentSceneObjAndLightCurves(scenes[currentScene])
+
+def updateCurrentSceneObjAndLightCurves(scene):
+    global currentSceneObj
+    currentSceneObj = scene
+    computeBrightnessCurves()
 
 def nextScene():
     global currentScene
     if len(scenes) > 0:
         logger.info("moving to next scene")
         currentScene = (currentScene + 1) % len(scenes)
-        updateScene(scenes[currentScene])
+        updateCurrentSceneObjWithCurrentScene()
+        updateScene()
 
 def previousScene():
     global currentScene
@@ -280,14 +272,18 @@ def previousScene():
         currentScene = currentScene - 1
         if (currentScene < 0):
             currentScene = len(scenes) - 1
-        updateScene(scenes[currentScene])
+        updateCurrentSceneObjWithCurrentScene()
+        updateScene()
 
 def dumpInfo():
     logger.info("There are %d scenes saved." % len(scenes))
-    logger.info("Current scene: %d" % currentScene)
+    logger.info("Current scene index: %d" % currentScene)
+    logger.info("Current scene object: %s" % str(currentSceneObj))
     logger.info("Scenes:")
     for i in range(0,len(scenes)):
         logger.info(str(scenes[i]))
+    sceneFromHue = readCurrentScene()
+    logger.info("Scene from hue: %s" % str(sceneFromHue))
 
 def loadData():
     global scenes
@@ -492,15 +488,61 @@ def knobCheckWorker():
         except Exception as ex:
             logger.exception(ex)
 
-
-
-# TODO what's this for?  finish it
-def sceneIsDifferent(scene1, scene2):
+# Lights are different if one is on and the other is off
+# or if they are different colors
+def lightIsDifferent(light1, light2):
+    lightState1 = light1.lightState
+    lightState2 = light2.lightState
+    if lightState1.on != lightState2.on:
+        return True
+    if lightState1.mode != lightState2.mode:
+        return True
+    if lightState1.mode == 'ct':
+        if lightState1.ct != lightState2.ct:
+            return True
+    if lightState1.mode == 'xy':
+        if lightState1.xy != lightState2.xy:
+            return True
     return False
 
-# TODO what's this for?  finish it
-def readScene(json):
-    pass
+
+def sceneIsDifferent(scene1, scene2):
+    if scene1 == None:
+        return scene2 != None
+    if scene2 == None:
+        return scene1 != None
+    lights1 = scene1.lights
+    lights2 = scene2.lights
+    for k in lights1.keys():
+        light1 = lights1[k]
+        light2 = lights2[k]
+        if lightIsDifferent(light1, light2):
+            return True
+    return False
+
+# Convert json scene into objects
+def readScene(lightsJson):
+    scene = Scene()
+    for lightnum, info in lightsJson.iteritems():
+        name = info['name']
+        state = info['state']
+        bri = state['bri']
+        mode = state['colormode']
+        ct = state['ct']
+        on = state['on']
+        xyArray = state['xy']
+        xyTuple = (xyArray[0], xyArray[1])
+        lightState = LightState(bri,mode,ct,xyTuple,on)
+        light = Light(name, lightState)
+        scene.addLight(lightnum, light)
+    return scene
+
+
+# Fetch the scene json and parse it
+def readCurrentScene():
+    jsonText = get(getBaseUrl())
+    lightsJson = json.loads(jsonText)
+    return readScene(lightsJson)
 
 def lightCheckWorker():
     global lightsOff
@@ -519,12 +561,17 @@ def lightCheckWorker():
                 updateMainLed()
                 lightsOff = newLightsOff
 
-            # TODO impleme this logic...
             # Grab the current scene.  If it's different from the old one, update curves etc
+            # This will be triggered if someone changes the scene on a phone
+            # And also will be triggered the first call since currentSceneObj starts as None
+            # And may also be triggered when we switch lights
+            # Don't send commands to Hue here, we might get in a weird feedback loop
             newSceneObj = readScene(lightsJson)
             if sceneIsDifferent(newSceneObj, currentSceneObj):
-                updateScene(newSceneObj)
-                currentSceneObj = newSceneObj
+                logger.info("Detected external scene change")
+                #logger.debug("curSceneObj : %s" % (str(currentSceneObj)))
+                #logger.debug("newSceneObj : %s" % (str(newSceneObj)))
+                updateCurrentSceneObjAndLightCurves(newSceneObj)
 
         except Exception as ex:
             logger.exception(ex)
@@ -546,7 +593,7 @@ def clearLights():
 
 def clearAllLights():
     try:
-        # TODO implement this
+        # TODO implement this, maybe
         logger.info("Clearing all lights")
     except Exception as ex:
         logger.exception(ex)
