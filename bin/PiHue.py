@@ -40,6 +40,7 @@ import json
 import logging
 import logging.handlers
 import os
+import pickle
 import spidev
 import threading
 import time
@@ -77,6 +78,7 @@ DISCOVERY_URL = "https://www.meethue.com/api/nupnp"
 DATA_DIR = "/var/piHue"
 LOGS_DIR = "/var/piHue/logs"
 LOG_FILE_BASE = "/var/piHue/logs/pieHue.log"
+DATA_FILE = "/var/piHue/scenes.p"
 CONFIG_FILE = "%s/piHue.conf" % DATA_DIR
 HUE_SECTION = "Hue"
 BRIDGE_IP_OPTION = "bridgeIp"
@@ -97,8 +99,46 @@ lastKnob = 0
 # Map from light IDs to curves
 lightToCurve = {}
 
+# Index of current scene
+currentScene = 0
+
 # Representation of current scene
-currentScene = []
+currentSceneObj = None
+
+class Scene:
+    def __init__(self):
+        self.lights = {}
+
+    def addLight(self, lightnum, light):
+        self.lights[lightnum] = light
+
+    def __str__(self):
+        s = "[\n"
+        for k in sorted(self.lights.keys()):
+            v = self.lights[k]
+            s += "  " + str(k) + " -> " + str(v) + "\n"
+        return s + "]"
+            
+class Light:
+    def __init__(self, name, lightState):
+        self.name = name
+        self.lightState = lightState
+
+    def __str__(self):
+        return "[light: name=%s, state=%s]" % (self.name, self.lightState)
+
+class LightState:
+    def __init__(self, bri, mode, ct, xy, on):
+        self.bri = bri
+        self.mode = mode
+        self.ct = ct
+        self.xy = xy
+        self.on = on
+
+    def __str__(self):
+        return "[lightState: bri=%s, mode=%s, ct=%s, xy=%s on=%s]" % (self.bri, self.mode, self.ct, self.xy, self.on)
+
+scenes = []
 
 GPIO.setmode(GPIO.BOARD)
 GPIO.setup(GREEN_LED_PIN, GPIO.OUT)
@@ -139,6 +179,45 @@ def getBaseUrl():
 def makeStateUrl(lightnum):
     return "%s/%d/state" % (getBaseUrl(), lightnum)
 
+def updateCt(lightnum, ct):
+  url = makeStateUrl(lightnum)
+  data = "{\"ct\": %d}" % ct
+  put(url, data)
+
+def updateBri(lightnum, bri):
+  url = makeStateUrl(lightnum)
+  data = "{\"bri\": %d}" % bri
+  put(url, data)
+
+def updateColormode(lightnum, colormode):
+  url = makeStateUrl(lightnum)
+  data = "{\"colormode\": %s}" % colormode
+  put(url, data)
+
+def updateXy(lightnum, xy):
+  url = makeStateUrl(lightnum)
+  data = "{\"xy\": [%s, %s]}" % xy
+  put(url, data)
+
+def updateOn(lightnum, isOn):
+  url = makeStateUrl(lightnum)
+  data = "{\"on\": %s}" % str(isOn).lower()
+  put(url, data)
+
+def updateLight(lightnum, light):
+    state = light.lightState
+    updateColormode(lightnum, state.mode)
+    updateCt(lightnum, state.ct)
+    updateXy(lightnum, state.xy)
+    updateBri(lightnum, state.bri)
+    updateOn(lightnum, state.on)
+
+def updateScene(scene):
+    global currentSceneObj
+    currentSceneObj = scene
+    for lightnum, light in scene.lights.iteritems():
+        updateLight(int(lightnum), light)
+
 def fetchHueBridgeIp():
     jsonText = get(DISCOVERY_URL)
     bridgesJson = json.loads(jsonText)
@@ -150,6 +229,72 @@ def writeConfig(bridgeIp):
     f = open(CONFIG_FILE, 'w')
     f.write("[%s]\n%s=%s" % (HUE_SECTION, BRIDGE_IP_OPTION, bridgeIp))
     f.close
+
+def printState():
+  lightsJson = get(getBaseUrl())
+  print(str(lightsJson))
+
+def saveScene():
+    logger.info("saving scene")
+    # TODO this logic can be refactored into readScene, used during lightCheckworker
+    jsonText = get(getBaseUrl())
+    lightsJson = json.loads(jsonText)
+    scene = Scene()
+    scenes.insert(currentScene, scene)
+    for lightnum, info in lightsJson.iteritems():
+        name = info['name']
+        state = info['state']
+        bri = state['bri']
+        mode = state['colormode']
+        ct = state['ct']
+        on = state['on']
+        xyArray = state['xy']
+        xyTuple = (xyArray[0], xyArray[1])
+        lightState = LightState(bri,mode,ct,xyTuple,on)
+        light = Light(name, lightState)
+        scene.addLight(lightnum, light)
+    saveData()
+
+def deleteScene():
+    global scenes
+    logger.info("deleting scene")
+    if (len(scenes) > 0):
+        scene = scenes[currentScene]
+        scenes.remove(scene)
+        saveData()
+    # Try to make currentScene in an ok state.  If there's no scenes left, nothing happens
+    previousScene()
+        
+
+def nextScene():
+    global currentScene
+    if len(scenes) > 0:
+        logger.info("moving to next scene")
+        currentScene = (currentScene + 1) % len(scenes)
+        updateScene(scenes[currentScene])
+
+def previousScene():
+    global currentScene
+    if (len(scenes) > 0):
+        logger.info("moving to previous scene")
+        currentScene = currentScene - 1
+        if (currentScene < 0):
+            currentScene = len(scenes) - 1
+        updateScene(scenes[currentScene])
+
+def dumpInfo():
+    logger.info("There are %d scenes saved." % len(scenes))
+    logger.info("Current scene: %d" % currentScene)
+    logger.info("Scenes:")
+    for i in range(0,len(scenes)):
+        logger.info(str(scenes[i]))
+
+def loadData():
+    global scenes
+    scenes = pickle.load(open(DATA_FILE, "rb"))
+
+def saveData():
+    pickle.dump(scenes, open(DATA_FILE, "wb"))
 
 def readConfig():
     config = ConfigParser.ConfigParser()
@@ -288,6 +433,7 @@ def indicateSwitch():
     blinkAll(2, FAST_BLINK_TIME)
 
 def toggleLights():
+    logger.info("Toggling lights")
     global lightsOff
     if lightsOff:
         allOn()
@@ -331,25 +477,26 @@ def knobCheckWorker():
     # Take a first reading, so we can detect the first move
     lastKnob = readKnob()
     while True:
-        knob = readKnob()
-        # We want some threshold to prevent jitter
-        if (abs(knob - lastKnob) > JITTER_TOLERANCE):
-            # flatten extremes
-            if (knob <= JITTER_TOLERANCE):
-                knob = 0
-            elif (knob >= KNOB_MAX - JITTER_TOLERANCE):
-                knob = KNOB_MAX
-            lastKnob = knob
-            updateBrightness()
-        time.sleep(CHECK_KNOB_SLEEP_TIME)
+        try:
+            knob = readKnob()
+            # We want some threshold to prevent jitter
+            if (abs(knob - lastKnob) > JITTER_TOLERANCE):
+                # flatten extremes
+                if (knob <= JITTER_TOLERANCE):
+                    knob = 0
+                elif (knob >= KNOB_MAX - JITTER_TOLERANCE):
+                    knob = KNOB_MAX
+                lastKnob = knob
+                updateBrightness()
+            time.sleep(CHECK_KNOB_SLEEP_TIME)
+        except Exception as ex:
+            logger.exception(ex)
+
+
 
 # TODO what's this for?  finish it
 def sceneIsDifferent(scene1, scene2):
     return False
-
-# TODO what's this for? finish it
-def updateScene(scene):
-    print("Updating Scene")
 
 # TODO what's this for?  finish it
 def readScene(json):
@@ -357,46 +504,66 @@ def readScene(json):
 
 def lightCheckWorker():
     global lightsOff
-    global currentScene
+    global currentSceneObj
     while True:
-        time.sleep(CHECK_LIGHTS_SLEEP_TIME)
-        # Fetch json
-        jsonText = get(getBaseUrl())
-        lightsJson = json.loads(jsonText)
+        try:
+            time.sleep(CHECK_LIGHTS_SLEEP_TIME)
+            # Fetch json
+            jsonText = get(getBaseUrl())
+            lightsJson = json.loads(jsonText)
 
-        # If lights have changed (e.g., by phone), update light state
-        newLightsOff = allLightsAreOff(lightsJson)        
-        if newLightsOff != lightsOff:
-            lightsOff = newLightsOff
-            updateMainLed()
-        lightsOff = newLightsOff
+            # If lights have changed (e.g., by phone), update light state
+            newLightsOff = allLightsAreOff(lightsJson)        
+            if newLightsOff != lightsOff:
+                lightsOff = newLightsOff
+                updateMainLed()
+                lightsOff = newLightsOff
 
-        # Grab the current scene.  If it's different from the old one, update curves etc
-        newScene = readScene(lightsJson)
-        if sceneIsDifferent(newScene, currentScene):
-            updateScene(newScene)
-        currentScene = newScene
+            # TODO impleme this logic...
+            # Grab the current scene.  If it's different from the old one, update curves etc
+            newSceneObj = readScene(lightsJson)
+            if sceneIsDifferent(newSceneObj, currentSceneObj):
+                updateScene(newSceneObj)
+                currentSceneObj = newSceneObj
 
-# TODO finish this
+        except Exception as ex:
+            logger.exception(ex)
+
 def saveLights():
-    print("Saving lights")
+    try:
+        logger.info("Saving lights")
+        saveScene()
+    except Exception as ex:
+        logger.exception(ex)
 
-# TODO finish this
+
 def clearLights():
-    print("Clearing lights")
+    try:
+        logger.info("Clearing lights")
+        deleteScene()
+    except Exception as ex:
+        logger.exception(ex)
 
-# TODO finish this
 def clearAllLights():
-    print("Clearing all lights")
+    try:
+        # TODO implement this
+        logger.info("Clearing all lights")
+    except Exception as ex:
+        logger.exception(ex)
 
-# TODO finish this
 def switchLightsBackward():
-    print("Switching lights backward")
+    try:
+        logger.info("Switching lights backward")
+        previousScene()
+    except Exception as ex:
+        logger.exception(ex)
 
-# TODO finish this
 def switchLightsForward():
-    print("Switching lights forward")
-
+    try:
+        logger.info("Switching lights forward")
+        nextScene()
+    except Exception as ex:
+        logger.exception(ex)
 
 # Blue button
 def blueLongPressAction():
@@ -424,7 +591,8 @@ def redButtonCheckWorker():
 
 # Square button
 def squareLongPressAction():
-    threading.Thread(target=clearAllLights).start()
+#    threading.Thread(target=clearAllLights).start()
+    threading.Thread(target=dumpInfo).start()
     indicateClearAll()
 
 def squareShortPressAction():
@@ -445,33 +613,35 @@ def buttonCheckWorker(buttonPin, buttonLightPin, shortPressAction, longPressActi
         GPIO.output(buttonLightPin, isOn)
 
     while True:
-        # TODO wrap the body of this loop in an try handler
-        detectedPress = False
-        detectedLongPress = False
-        updateLed(False)
-        time.sleep(CHECK_BUTTON_SLEEP_TIME)
-        # Button is normally high.  If it's low, it's been pressed
-        input_value = GPIO.input(buttonPin)
-        start = 0
-        if input_value == False:
-            detectedPress = True
-            updateLed(True)
-            # Start a timer, when the timer is exceeded, we've detected a long press
-            start = time.time()
-	while input_value == False and not detectedLongPress:
+        try:
+            detectedPress = False
+            detectedLongPress = False
+            updateLed(False)
             time.sleep(CHECK_BUTTON_SLEEP_TIME)
+            # Button is normally high.  If it's low, it's been pressed
             input_value = GPIO.input(buttonPin)
-            timeHeld = time.time() - start
-            if (timeHeld > LONG_PRESS_TIME):
-                updateLed(False)
-                detectedLongPress = True
-                longPressAction()
-                # wait until the button is released, so the main loop starts fresh
-                while input_value == False:
+            start = 0
+            if input_value == False:
+                detectedPress = True
+                updateLed(True)
+                # Start a timer, when the timer is exceeded, we've detected a long press
+                start = time.time()
+                while input_value == False and not detectedLongPress:
                     time.sleep(CHECK_BUTTON_SLEEP_TIME)
                     input_value = GPIO.input(buttonPin)
-        if detectedPress and not detectedLongPress:
-            shortPressAction()
+                    timeHeld = time.time() - start
+                    if (timeHeld > LONG_PRESS_TIME):
+                        updateLed(False)
+                        detectedLongPress = True
+                        longPressAction()
+                        # wait until the button is released, so the main loop starts fresh
+                        while input_value == False:
+                            time.sleep(CHECK_BUTTON_SLEEP_TIME)
+                            input_value = GPIO.input(buttonPin)
+                if detectedPress and not detectedLongPress:
+                    shortPressAction()
+        except Exception as ex:
+            logger.exception(ex)
 
 def initADC():
     global spi
@@ -517,16 +687,26 @@ def initConfig():
     bridgeIp = readConfig()
 
 
+def loadScenes():
+    try:
+        logger.info("Attempting to load the scene file..")
+        loadData()
+        logger.info("Successfully loaded scenes.")
+    except:
+        logger.warn("Load not successful.  Could be first launch or the data file may have been deleted or corrupted.")
+
+
 def init():
     try:
         initLogger()
+        logger.info("Initializing system.")
         initConfig()
-        logger.info("Starting...")
         initADC()
         initLightState()
         logger.info("Bridge ip is %s" % bridgeIp)
         computeBrightnessCurves()
         updateMainLed()
+        loadScenes()
     except Exception as ex:
         print("ex is %s" % str(ex))
         logger.exception(ex)
