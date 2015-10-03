@@ -29,6 +29,10 @@
 # - blinkAllSixTimes - indicates clear
 # - circleBlink - indicates clear all
 # - blinkTwice - indicates switching scenes
+#
+# Log data is saved at /var/piHue/logs
+
+# TODO log.debug events like switching scenes
 
 from __future__ import division
 import RPi.GPIO as GPIO
@@ -337,17 +341,19 @@ def knobCheckWorker():
                 knob = KNOB_MAX
             lastKnob = knob
             updateBrightness()
-    time.sleep(CHECK_KNOB_SLEEP_TIME)
+        time.sleep(CHECK_KNOB_SLEEP_TIME)
 
+# TODO what's this for?  finish it
 def sceneIsDifferent(scene1, scene2):
     return False
 
+# TODO what's this for? finish it
 def updateScene(scene):
     print("Updating Scene")
 
+# TODO what's this for?  finish it
 def readScene(json):
     pass
-
 
 def lightCheckWorker():
     global lightsOff
@@ -371,18 +377,23 @@ def lightCheckWorker():
             updateScene(newScene)
         currentScene = newScene
 
+# TODO finish this
 def saveLights():
     print("Saving lights")
 
+# TODO finish this
 def clearLights():
     print("Clearing lights")
 
+# TODO finish this
 def clearAllLights():
     print("Clearing all lights")
 
+# TODO finish this
 def switchLightsBackward():
     print("Switching lights backward")
 
+# TODO finish this
 def switchLightsForward():
     print("Switching lights forward")
 
@@ -434,6 +445,7 @@ def buttonCheckWorker(buttonPin, buttonLightPin, shortPressAction, longPressActi
         GPIO.output(buttonLightPin, isOn)
 
     while True:
+        # TODO wrap the body of this loop in an try handler
         detectedPress = False
         detectedLongPress = False
         updateLed(False)
@@ -481,7 +493,7 @@ def initLogger():
     logger = logging.getLogger('logjam')
     logger.setLevel(logging.DEBUG)
 
-    handler = logging.handlers.RotatingFileHandler(LOG_FILE_BASE, maxBytes=1000000, backupCount=3)
+    handler = logging.handlers.RotatingFileHandler(LOG_FILE_BASE, maxBytes=1000000, backupCount=20)
     handler.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
