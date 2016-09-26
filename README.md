@@ -7,6 +7,22 @@ There are a number of testing scripts in the "experiments" directory,
 but the primary project contains code for a Raspberry-Pi based
 Hue Light controller.  It consists of 3 buttons and a knob.
 
+We use the Raspberry Pi B+ as the central controller.  The GPIO
+has the following pinout:
+![Schematic](/images/Pi-Bplus-Pinout.png)
+
+Here is the schematic for the controller:
+![Schematic](/images/PiHueHat-Layout.png)
+
+The prototype can be put together on a simple PiHat:
+![Blank PiHat](/images/Perma-Proto.jpg)
+
+Here is the front:
+![Proto Front](/images/Proto-front.png)
+
+And the Back:
+![Proto Back](/images/Proto-back.png)
+
 The 3 buttons are:
 * a large square LED which serves as the main button
 * a red button which is the "back" button
